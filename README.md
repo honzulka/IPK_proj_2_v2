@@ -1,0 +1,1 @@
+Viz [secret](secret.1) or [manual](manual.pdf)
