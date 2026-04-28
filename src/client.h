@@ -1,26 +1,23 @@
 /**
  * @file client.h
- * @brief Client API for initiating file transfers.
- * 
+ * @brief UDP client for reliable data transfer (Go-Back-N).
+ *
  * @author Jan Cernoch <xcernoj00>
  */
 
 #ifndef CLIENT_H
 #define CLIENT_H
 
-#include <stddef.h>
+#include <stdio.h>
 
 /**
- * @brief Start the client and send a file to the given target.
+ * @brief Start UDP client.
  *
- * This function implements the high-level client behavior. It resolves the
- * target address, opens the file, fragments and encrypts it, and sends the
- * protocol packets. On fatal errors the function will exit the process.
- *
- * @param target Hostname or IP address string (IPv4 or IPv6).
- * @param filename Path to the file to send.
- * @param verbose Non-zero to enable verbose logging.
+ * @param port UDP port
+ * @param address Target address
+ * @param input Input FILE*
+ * @param timeout Timeout in seconds
  */
-void start_client(const char *target, const char *filename, int verbose);
+void start_client(int port, const char *address, FILE *input, int timeout);
 
 #endif /* CLIENT_H */

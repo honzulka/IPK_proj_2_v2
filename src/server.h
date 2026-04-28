@@ -1,21 +1,23 @@
 /**
  * @file server.h
- * @brief Server public API for listening/receiving file transfers.
- * 
+ * @brief UDP server for reliable data transfer.
+ *
  * @author Jan Cernoch <xcernoj00>
  */
 
 #ifndef SERVER_H
 #define SERVER_H
 
+#include <stdio.h>
+
 /**
- * @brief Start the server in listen mode.
+ * @brief Start UDP server.
  *
- * This function runs the server's main loop and blocks until the server
- * terminates. The server requires root privileges to open raw sockets.
- *
- * @param verbose Non-zero to enable verbose logging.
+ * @param port UDP port
+ * @param address Bind address (NULL = all)
+ * @param output Output FILE*
+ * @param timeout Timeout in seconds
  */
-void start_server(int verbose);
+void start_server(int port, const char *address, FILE *output, int timeout);
 
 #endif /* SERVER_H */

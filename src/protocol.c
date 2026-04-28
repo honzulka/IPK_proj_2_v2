@@ -1,135 +1,148 @@
 /**
  * @file protocol.c
- * @brief UDP Reliable Data Transfer protocol implementation
+ * @brief UDP Reliable Data Transfer protocol implementation.
  *
  * @author Jan Cernoch <xcernoj00> and ChatGPT (checksum functions)
  */
 
 #include "protocol.h"
-#include <arpa/inet.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
 
-/**
- * @brief Compute RFC1071 checksum
- */
-uint16_t compute_checksum(const uint8_t *data, size_t len) {
+/* ================= CHECKSUM ================= */
+
+uint16_t compute_checksum(const void *data, size_t len) {
+  const uint8_t *buf = data;
   uint32_t sum = 0;
 
   while (len > 1) {
-    sum += ((uint16_t)data[0] << 8) | data[1];
-    data += 2;
+    sum += *buf++;
     len -= 2;
   }
 
   if (len == 1) {
-    sum += ((uint16_t)data[0] << 8);
+    sum += *(const uint8_t *)buf;
   }
 
-  while (sum >> 16) {
+  while (sum >> 16)
     sum = (sum & 0xFFFF) + (sum >> 16);
-  }
 
   return (uint16_t)(~sum);
 }
 
-void header_hton(rdt_header_t *h) {
-  h->conn_id = htonl(h->conn_id);
-  h->seq     = htonl(h->seq);
-  h->ack     = htonl(h->ack);
-  h->len     = htons(h->len);
-  h->checksum = htons(h->checksum);
-}
-
-void header_ntoh(rdt_header_t *h) {
-  h->conn_id = ntohl(h->conn_id);
-  h->seq     = ntohl(h->seq);
-  h->ack     = ntohl(h->ack);
-  h->len     = ntohs(h->len);
-  h->checksum = ntohs(h->checksum);
-}
+/* ================= BUILD ================= */
 
 pkt_t build_packet(const rdt_header_t *hdr, const uint8_t *payload) {
   pkt_t pkt = {0};
 
-  if (!hdr) return pkt;
+  if (!hdr)
+    return pkt;
+
+  if (hdr->len > MAX_PAYLOAD_SIZE)
+    return pkt;
 
   size_t total_len = RDT_HEADER_SIZE + hdr->len;
 
-  if (hdr->len > MAX_DATA_SIZE || total_len > MAX_UDP_PAYLOAD) {
+  uint8_t *buf = malloc(total_len);
+  if (!buf)
     return pkt;
+
+  rdt_header_t tmp = *hdr;
+
+  /* convert to network byte order */
+  tmp.conn_id = htonl(tmp.conn_id);
+  tmp.seq     = htonl(tmp.seq);
+  tmp.ack     = htonl(tmp.ack);
+  tmp.len     = htons(tmp.len);
+  tmp.checksum = 0;
+
+  memcpy(buf, &tmp, RDT_HEADER_SIZE);
+
+  if (payload && hdr->len > 0) {
+    memcpy(buf + RDT_HEADER_SIZE, payload, hdr->len);
   }
 
-  pkt.data = malloc(total_len);
-  if (!pkt.data) {
-    return pkt;
-  }
+  /* compute checksum */
+  uint16_t cks = compute_checksum(buf, total_len);
 
-  /* prepare header copy */
-  rdt_header_t net_hdr = *hdr;
-  net_hdr.checksum = 0;
+  /* store checksum in network byte order */
+  ((rdt_header_t *)buf)->checksum = htons(cks);
 
-  header_hton(&net_hdr);
-
-  memcpy(pkt.data, &net_hdr, RDT_HEADER_SIZE);
-
-  if (hdr->len > 0 && payload) {
-    memcpy(pkt.data + RDT_HEADER_SIZE, payload, hdr->len);
-  }
-
-  /* compute checksum over whole packet */
-  uint16_t cksum = compute_checksum(pkt.data, total_len);
-
-  /* write checksum (network order!) */
-  ((rdt_header_t *)pkt.data)->checksum = htons(cksum);
-
+  pkt.data = buf;
   pkt.len = total_len;
   return pkt;
 }
 
-int parse_packet(uint8_t *buffer, size_t len,
-                 rdt_header_t *hdr_out,
-                 uint8_t **payload_out) {
+/* ================= PARSE ================= */
 
-  if (!buffer || len < RDT_HEADER_SIZE) {
-    return -1;
-  }
+int parse_packet(const uint8_t *buffer, size_t len, rdt_header_t *hdr_out, uint8_t **payload_out) {
+  if (!buffer || !hdr_out)
+    return -11;
 
-  rdt_header_t *hdr = (rdt_header_t *)buffer;
+  if (len < RDT_HEADER_SIZE)
+    return -21;
 
-  /* save and zero checksum for verification */
-  uint16_t recv_cksum = hdr->checksum;
-  hdr->checksum = 0;
+  /* checksum (raw) */
+  uint16_t recv_cks = ((rdt_header_t *)buffer)->checksum;
+  recv_cks = ntohs(recv_cks);
 
-  uint16_t calc_cksum = compute_checksum(buffer, len);
-
-  /* restore checksum */
-  hdr->checksum = recv_cksum;
-
-  if (recv_cksum != htons(calc_cksum)) {
-    return -1;
-  }
-
-  /* copy + convert header */
+  /* copy header first */
   memcpy(hdr_out, buffer, RDT_HEADER_SIZE);
-  header_ntoh(hdr_out);
 
-  /* validate length */
-  if (RDT_HEADER_SIZE + hdr_out->len != len) {
-    return -1;
-  }
+  /* convert immediately */
+  hdr_out->conn_id = ntohl(hdr_out->conn_id);
+  hdr_out->seq     = ntohl(hdr_out->seq);
+  hdr_out->ack     = ntohl(hdr_out->ack);
+  hdr_out->len     = ntohs(hdr_out->len);
 
-  if (payload_out) {
-    *payload_out = buffer + RDT_HEADER_SIZE;
-  }
+  /* now validate length BEFORE touching payload */
+  size_t pkt_len = RDT_HEADER_SIZE + hdr_out->len;
+
+  if (pkt_len != len)
+    return -41;
+
+  if (hdr_out->len > MAX_PAYLOAD_SIZE)
+    return -51;
+
+  /* checksum validation over exact packet */
+  uint8_t tmp[pkt_len];
+  memcpy(tmp, buffer, pkt_len);
+  memset(tmp + offsetof(rdt_header_t, checksum), 0, sizeof(uint16_t));
+
+  uint16_t calc_cks = compute_checksum(tmp, pkt_len);
+
+  if (recv_cks != calc_cks)
+    return -31;
+
+  /* flags check */
+  uint8_t allowed = FLAG_SYN | FLAG_ACK | FLAG_FIN | FLAG_DATA;
+  if (hdr_out->flags & ~allowed)
+    return -61;
+
+  if (payload_out)
+    *payload_out = (uint8_t *)(buffer + RDT_HEADER_SIZE);
 
   return 0;
 }
 
-void free_packet(pkt_t *pkt) {
-  if (pkt && pkt->data) {
-    free(pkt->data);
-    pkt->data = NULL;
-    pkt->len = 0;
-  }
+/* ================= VALIDATION ================= */
+
+int header_valid(const rdt_header_t *hdr, const uint8_t *buffer, size_t len) {
+  (void)buffer; /* unused */
+
+  if (!hdr)
+    return 0;
+
+  if (len < RDT_HEADER_SIZE)
+    return 0;
+
+  if (hdr->len > MAX_PAYLOAD_SIZE)
+    return 0;
+
+  if ((size_t)RDT_HEADER_SIZE + hdr->len != len)
+    return 0;
+
+  return 1;
 }

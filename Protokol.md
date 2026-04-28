@@ -200,7 +200,7 @@ Progress znamená:
 
 ---
 
-## 14. Ukázka přenosu
+## 13. Ukázka přenosu
 
 | Čas | Odesílatel | Flag    | seq | ack | Poznámka                   |
 | --- | ---------- | ------- | --- | --- | -------------------------- |

@@ -156,8 +156,5 @@ int main(int argc, char **argv) {
       start_client(port, address, input, timeout);
   }
 
-  if (input != stdin) fclose(input);
-  if (output != stdout) fclose(output);
-
   return EXIT_SUCCESS;
 }
