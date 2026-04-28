@@ -1,97 +1,219 @@
-# Návrh protokolu pro přenos souborů přes ICMP
+# Návrh protokolu pro Reliable Data Transfer over UDP
 
-Tento protokol je vlastní implementací spolehlivého přenosu souborů nad ICMP/ICMPv6, inspirovaný principy TCP, ale přizpůsobený pro skrytý kanál.
-
----
-
-## 1. FLAGY protokolu
-
-Pro přehlednost jsou definovány flagy jako `enum`:
-
-| Enum hodnota | Název      | Význam |
-|-------------:|:-----------|:-------|
-| 0            | FLAG_HELLO | Počáteční paket (SYN) / HELLO |
-| 1            | FLAG_READY | Odpověď serveru (SYN-ACK) / READY |
-| 2            | FLAG_ACK   | Acknowledgement (krátké potvrzení) |
-| 3            | FLAG_META  | Metadata paket (filename, filesize, total_fragments, hash) |
-| 4            | FLAG_DATA  | Data paket (obsahuje fragment souboru) |
-| 5            | FLAG_FIN   | Klient ukončuje přenos (FIN) |
-| 6            | FLAG_OK    | Server: přenos OK (vše přijato a validováno) |
-| 7            | FLAG_FAIL  | Server: přenos selhal / chybí fragmenty — v těle seznam chybějících seq_num nebo kód chyby |
+Tento protokol implementuje spolehlivý a uspořádaný přenos dat nad UDP. Je inspirován principy TCP, ale je zjednodušen tak, aby splňoval požadavky zadání.
 
 ---
 
-## 2. Handshake (navázání spojení)
+## 1. Základní principy
 
-1. **Klient** pošle první ICMP paket typu `FLAG_HELLO`.
-2. **Server** odpoví paketem typu `FLAG_READY` (potvrzení dostupnosti a připravenosti přijímat).
-3. **Klient** potvrdí paketem typu `FLAG_ACK`.
+Protokol zajišťuje:
 
-**Výsledek:** logické navázání spojení mezi klientem a serverem.
-
----
-
-## 3. Metadata paket (první paket)
-
-- Flag: `FLAG_META`
-- Obsahuje informace o souboru:
-  - `filename` – název souboru
-  - `filesize` – velikost souboru v bajtech
-  - `total_fragments` – počet fragmentů
-  - `seq_num` – počáteční sekvenční číslo (většinou 1)
-  - Volitelně: `hash` (např. SHA256) pro kontrolu integrity
-
-**Účel:** server připraví buffer a určí počet očekávaných fragmentů.
+* spolehlivý přenos (retransmise ztracených paketů)
+* uspořádané doručení dat (sequence numbers)
+* detekci duplicitních paketů
+* odolnost vůči ztrátě, reorderingu a jitteru
+* explicitní navázání a ukončení spojení
+* průběžné potvrzování přijatých dat (ACK)
+* ochranu integrity pomocí checksumu
 
 ---
 
-## 4. Data pakety
+## 2. Formát paketu
 
-- Flag: `FLAG_DATA`
-- Obsahuje:
-  - `seq_num` – pořadové číslo fragmentu
-  - `data` – fragment šifrovaných dat souboru
-- Fragmentace: každý fragment přibližně 1400 B (pro standardní MTU)
-- Server ukládá fragmenty podle `seq_num`.
+Každý UDP datagram obsahuje hlavičku a payload.
 
-**Doporučení:** přidat kontrolní součet (CRC/checksum) pro každý fragment.
+### Header
 
----
+| Pole     | Velikost | Popis                                         |
+| -------- | -------- | --------------------------------------------- |
+| conn_id  | 32 bit   | Identifikátor spojení                         |
+| seq      | 32 bit   | Sekvenční číslo (index segmentu)              |
+| ack      | 32 bit   | Kumulativní ACK (nejbližší očekávaný segment) |
+| len      | 16 bit   | Délka payloadu                                |
+| flags    | 8 bit    | Typ paketu                                    |
+| checksum | 16 bit   | Kontrolní součet (header + payload)           |
 
-## 5. Loučící paket (terminace spojení)
+### Payload
 
-- Flag: `FLAG_FIN`
-- Klient posílá poslední paket typu `FLAG_FIN`.
-- Server provede:
-  - Kontrolu přijetí všech fragmentů (`seq_num` 1..total_fragments)
-  - Kontrolu integrity souboru (pokud se posílal hash)
-- Server odpoví:
-  - `FLAG_OK` – vše přijato a validováno
-  - `FLAG_FAIL` – chybějící/neplatné fragmenty, případně seznam chybějících seq_num
-
-**Výsledek:** jasné ukončení spojení a kontrola completeness přenosu.
+* DATA paket: obsahuje data
+* SYN paket: může obsahovat metadata (např. velikost dat)
+* ACK/FIN: bez payloadu
 
 ---
 
-## 6. Shrnutí protokolu
+## 3. Flagy
 
-- Protokol simuluje spolehlivý přenos nad ICMP (handshake, seq_num, kontrola integrity, ukončení spojení)
-- Klient i server šifrují payload pomocí AES (klíč = login uživatele)
-- Retransmise nejsou povinné, ale lze je implementovat
-- Struktura paketů umožňuje flexibilní rozšíření pro další metadata nebo kontrolní mechanismy
+| Flag | Hodnota | Význam           |
+| ---- | ------- | ---------------- |
+| SYN  | 0x01    | Navázání spojení |
+| ACK  | 0x02    | Potvrzení        |
+| FIN  | 0x04    | Ukončení spojení |
+| DATA | 0x08    | Přenos dat       |
+
+Flagy lze kombinovat (např. SYN+ACK).
 
 ---
 
-## 7. Ukázka přenosu souboru
+## 4. Navázání spojení (3-way handshake)
 
-| Čas | Odesílatel | Flag       | Poznámka |
-|-----|------------|-----------|----------|
-| t0  | Klient     | FLAG_HELLO | Začínáme spojení |
-| t1  | Server     | FLAG_READY | Potvrzení dostupnosti |
-| t2  | Klient     | FLAG_META  | Posíláme metadata (filename, filesize, total_fragments) |
-| t3  | Server     | FLAG_ACK   | Potvrzení přijetí metadata |
-| t4  | Klient     | FLAG_DATA  | Fragment 1 |
-| t5  | Klient     | FLAG_DATA  | Fragment 2 |
-| ... | Klient     | FLAG_DATA  | Další fragmenty |
-| tn  | Klient     | FLAG_FIN   | Konec přenosu |
-| tn+1| Server     | FLAG_OK / FLAG_FAIL | Výsledek přenosu |
+1. Klient → Server: `SYN`
+
+   * nastaví `conn_id`
+   * nastaví počáteční `seq`
+
+2. Server → Klient: `SYN + ACK`
+
+   * potvrzuje klienta (`ack = client_seq + 1`)
+   * nastaví vlastní `seq`
+
+3. Klient → Server: `ACK`
+
+   * potvrzení serveru
+
+**Výsledek:** spojení je navázáno a obě strany znají identifikátor spojení i počáteční sekvence.
+
+---
+
+## 5. Přenos dat
+
+### DATA pakety
+
+* Flag: `DATA`
+* Obsah:
+
+  * `seq` – pořadové číslo segmentu
+  * `len` – velikost dat
+  * payload – data
+
+---
+
+### ACK (kumulativní potvrzení)
+
+Receiver udržuje proměnnou `expected_seq`.
+
+* pokud `seq == expected_seq`:
+
+  * paket je přijat
+  * data se zapíší
+  * `expected_seq++`
+* pokud `seq < expected_seq`:
+
+  * duplicitní paket → ignorován
+* pokud `seq > expected_seq`:
+
+  * out-of-order paket → ignorován (Go-Back-N)
+
+Receiver odesílá ACK:
+
+```
+ACK = expected_seq
+```
+
+---
+
+## 6. Pipelining (Sliding Window)
+
+Sender může mít více paketů současně „in-flight“.
+
+* velikost okna: např. 5–10 paketů
+* nové pakety jsou odesílány bez čekání na ACK
+
+Receiver:
+
+* zpracovává pakety sekvenčně
+* potvrzuje kumulativně
+
+---
+
+## 7. Retransmise
+
+Sender uchovává odeslané, ale nepotvrzené pakety.
+
+### Timeout:
+
+* pokud ACK nepřijde včas:
+
+  * paket je znovu odeslán
+
+### Strategie:
+
+* Go-Back-N:
+
+  * při ztrátě se znovu odešlou všechny pakety od prvního nepotvrzeného
+
+---
+
+## 8. Kontrola integrity
+
+Každý paket obsahuje checksum:
+
+* počítán přes header + payload
+* receiver:
+
+  * při chybě paket zahodí
+  * neposílá ACK
+
+---
+
+## 9. Duplicitní a out-of-order pakety
+
+Receiver:
+
+* `seq < expected_seq` → duplicitní → ignorovat
+* `seq > expected_seq` → mimo pořadí → ignorovat (Go-Back-N)
+
+---
+
+## 10. Ukončení spojení
+
+1. Klient → Server: `FIN`
+2. Server:
+
+   * ověří úplnost dat
+   * odešle `ACK`
+3. Server → Klient: `FIN`
+4. Klient → Server: `ACK`
+
+**Výsledek:** spojení je korektně ukončeno.
+
+---
+
+## 11. Timeout a ukončení
+
+Pokud po dobu `TIMEOUT` nedojde k žádnému progressu:
+
+* aplikace se ukončí s chybou
+
+Progress znamená:
+
+* přijetí nových dat
+* přijetí nového ACK
+* krok handshake/teardown
+
+---
+
+## 12. Omezení velikosti
+
+* maximální UDP payload: 1200 B
+* velikost headeru: ~17 B
+* maximální payload: ~1100 B
+
+---
+
+## 14. Ukázka přenosu
+
+| Čas | Odesílatel | Flag    | seq | ack | Poznámka                   |
+| --- | ---------- | ------- | --- | --- | -------------------------- |
+| t0  | Klient     | SYN     | 0   | 0   | Zahájení spojení           |
+| t1  | Server     | SYN+ACK | 0   | 1   | Potvrzení klienta          |
+| t2  | Klient     | ACK     | 1   | 1   | Dokončení handshake        |
+| t3  | Klient     | DATA    | 1   | 1   | Segment 1                  |
+| t4  | Klient     | DATA    | 2   | 1   | Segment 2                  |
+| t5  | Server     | ACK     | -   | 2   | Potvrzen segment 1         |
+| t6  | Klient     | DATA    | 3   | 1   | Segment 3                  |
+| t7  | Server     | ACK     | -   | 3   | Potvrzen segment 2         |
+| t8  | Server     | ACK     | -   | 4   | Potvrzen segment 3         |
+| t9  | Klient     | FIN     | 4   | 4   | Konec přenosu              |
+| t10 | Server     | ACK     | -   | 5   | Potvrzení FIN              |
+| t11 | Server     | FIN     | 0   | 5   | Ukončení ze strany serveru |
+| t12 | Klient     | ACK     | 5   | 1   | Spojení ukončeno           |
