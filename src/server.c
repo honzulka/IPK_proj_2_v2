@@ -40,19 +40,34 @@ static int create_socket(const char *address, int port) {
     return -1;
   }
 
-  for (rp = res; rp != NULL; rp = rp->ai_next) {
-    sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
-    if (sock < 0)
-      continue;
+  /* If -a is omitted, prefer IPv6 wildcard with dual-stack support first. */
+  for (int pass = 0; pass < 2 && sock < 0; pass++) {
+    for (rp = res; rp != NULL; rp = rp->ai_next) {
+      if (address == NULL) {
+        if (pass == 0 && rp->ai_family != AF_INET6)
+          continue;
+        if (pass == 1 && rp->ai_family == AF_INET6)
+          continue;
+      }
 
-    int reuse = 1;
-    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+      sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+      if (sock < 0)
+        continue;
 
-    if (bind(sock, rp->ai_addr, rp->ai_addrlen) == 0)
-      break;
+      int reuse = 1;
+      setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
-    close(sock);
-    sock = -1;
+      if (address == NULL && rp->ai_family == AF_INET6) {
+        int v6only = 0;
+        setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
+      }
+
+      if (bind(sock, rp->ai_addr, rp->ai_addrlen) == 0)
+        break;
+
+      close(sock);
+      sock = -1;
+    }
   }
 
   freeaddrinfo(res);
