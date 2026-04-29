@@ -58,7 +58,7 @@ static int create_socket(const char *address, int port) {
 /* ================= SERVER ================= */
 
 void start_server(int port, const char *address, FILE *output, int timeout) {
-  printf("Starting server...\n");
+
   int sock = create_socket(address, port);
   if (sock < 0) {
     fprintf(stderr, "ERROR: Cannot bind socket\n");
@@ -71,29 +71,33 @@ void start_server(int port, const char *address, FILE *output, int timeout) {
 
   uint32_t conn_id = 0;
   int connected = 0;
+  int meta_received = 0;
 
   uint32_t expected_seq = 0;
+  uint32_t total_segments = 0;
+
+  /* duplicate detection */
+  uint8_t *received = NULL;
 
   fd_set readfds;
-  printf("Listening...\n");
-  int init_timeout = 10; // waiting for any client to connect
+
+  int init_timeout = 10;
 
   while (1) {
+
     FD_ZERO(&readfds);
     FD_SET(sock, &readfds);
 
     struct timeval tv = { .tv_sec = init_timeout, .tv_usec = 0 };
 
     int rv = select(sock + 1, &readfds, NULL, NULL, &tv);
-    if (rv == 0) {
+    if (rv <= 0) {
       fprintf(stderr, "ERROR: Timeout\n");
-      exit(EXIT_FAILURE);
-    } else if (rv < 0) {
-      perror("select");
       exit(EXIT_FAILURE);
     }
 
-    ssize_t n = recvfrom(sock, buffer, sizeof(buffer), 0, (struct sockaddr *)&client_addr, &client_len);
+    ssize_t n = recvfrom(sock, buffer, sizeof(buffer), 0,
+                         (struct sockaddr *)&client_addr, &client_len);
 
     if (n < (ssize_t)RDT_HEADER_SIZE)
       continue;
@@ -107,46 +111,118 @@ void start_server(int port, const char *address, FILE *output, int timeout) {
     /* ================= HANDSHAKE ================= */
 
     if (!connected) {
-      printf("Starting handshake...\n");
-
       if (!(hdr.flags & FLAG_SYN))
         continue;
 
       conn_id = hdr.conn_id;
       expected_seq = 0;
 
-      /* SYN + ACK */
+      init_timeout = timeout;
+
       rdt_header_t synack = {
         .conn_id = conn_id,
         .seq = 0,
-        .ack = expected_seq,
+        .ack = 0,
         .len = 0,
         .flags = FLAG_SYN | FLAG_ACK
       };
 
       pkt_t pkt = build_packet(&synack, NULL);
 
-      sendto(sock, pkt.data, pkt.len, 0, (struct sockaddr *)&client_addr, client_len);
+      sendto(sock, pkt.data, pkt.len, 0,
+             (struct sockaddr *)&client_addr, client_len);
 
       free(pkt.data);
+
       connected = 1;
-      init_timeout = timeout;
       continue;
     }
 
+    
+    /* ================= META ================= */
+
+    if (hdr.flags & FLAG_META) {
+
+      if (hdr.len != sizeof(meta_payload_t))
+        continue;
+
+      meta_payload_t meta;
+      memcpy(&meta, payload, sizeof(meta));
+
+      /* convert from network byte order */
+      meta.file_size = ntohl(meta.file_size);
+      meta.total_segments = ntohl(meta.total_segments);
+
+      total_segments = meta.total_segments;
+
+      /* allocate duplicate detection buffer */
+      received = calloc(total_segments, sizeof(uint8_t));
+      if (!received) {
+        fprintf(stderr, "ERROR: malloc failed\n");
+        exit(EXIT_FAILURE);
+      }
+
+      meta_received = 1;
+
+      /* ACK META */
+      rdt_header_t ack = {
+        .conn_id = conn_id,
+        .seq = 0,
+        .ack = 0,
+        .len = 0,
+        .flags = FLAG_ACK
+      };
+
+      pkt_t pkt = build_packet(&ack, NULL);
+      sendto(sock, pkt.data, pkt.len, 0,
+             (struct sockaddr *)&client_addr, client_len);
+      free(pkt.data);
+
+      continue;
+    }
+
+    /* ignore everything before META */
+    if (!meta_received)
+      continue;
+    
     if (hdr.conn_id != conn_id)
       continue;
+
 
     /* ================= DATA ================= */
 
     if (hdr.flags & FLAG_DATA) {
-      printf("Starting receiving data...\n");
 
-      printf("hdr.seq: %u, expected_seq: %u\n", hdr.seq, expected_seq);
+      /* duplicate packet */
+      if (hdr.seq < total_segments && received[hdr.seq]) {
+
+        /* resend last ACK */
+        rdt_header_t ack = {
+          .conn_id = conn_id,
+          .seq = 0,
+          .ack = expected_seq,
+          .len = 0,
+          .flags = FLAG_ACK
+        };
+
+        pkt_t pkt = build_packet(&ack, NULL);
+        sendto(sock, pkt.data, pkt.len, 0,
+               (struct sockaddr *)&client_addr, client_len);
+        free(pkt.data);
+
+        continue;
+      }
+
+      /* correct in-order packet */
       if (hdr.seq == expected_seq) {
-        printf("zapisuju data\n");
+
         fwrite(payload, 1, hdr.len, output);
+        received[hdr.seq] = 1;
         expected_seq++;
+
+        /* move window forward (in case duplicates already arrived) */
+        while (expected_seq < total_segments && received[expected_seq])
+          expected_seq++;
       }
 
       /* cumulative ACK */
@@ -160,7 +236,8 @@ void start_server(int port, const char *address, FILE *output, int timeout) {
 
       pkt_t pkt = build_packet(&ack, NULL);
 
-      sendto(sock, pkt.data, pkt.len, 0, (struct sockaddr *)&client_addr, client_len);
+      sendto(sock, pkt.data, pkt.len, 0,
+             (struct sockaddr *)&client_addr, client_len);
 
       free(pkt.data);
       continue;
@@ -169,9 +246,7 @@ void start_server(int port, const char *address, FILE *output, int timeout) {
     /* ================= FIN ================= */
 
     if (hdr.flags & FLAG_FIN) {
-      printf("Finishing...\n");
 
-      /* ACK FIN */
       rdt_header_t ack = {
         .conn_id = conn_id,
         .seq = 0,
@@ -181,10 +256,10 @@ void start_server(int port, const char *address, FILE *output, int timeout) {
       };
 
       pkt_t pkt = build_packet(&ack, NULL);
-      sendto(sock, pkt.data, pkt.len, 0, (struct sockaddr *)&client_addr, client_len);
+      sendto(sock, pkt.data, pkt.len, 0,
+             (struct sockaddr *)&client_addr, client_len);
       free(pkt.data);
 
-      /* server FIN */
       rdt_header_t fin = {
         .conn_id = conn_id,
         .seq = 0,
@@ -194,11 +269,14 @@ void start_server(int port, const char *address, FILE *output, int timeout) {
       };
 
       pkt = build_packet(&fin, NULL);
-      sendto(sock, pkt.data, pkt.len, 0, (struct sockaddr *)&client_addr, client_len);
+      sendto(sock, pkt.data, pkt.len, 0,
+             (struct sockaddr *)&client_addr, client_len);
       free(pkt.data);
 
-      if (output != stdout) fclose(output);
+      if (output != stdout)
+        fclose(output);
 
+      free(received);
       close(sock);
       return;
     }

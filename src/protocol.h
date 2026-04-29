@@ -22,6 +22,7 @@
 #define FLAG_ACK  0x02
 #define FLAG_FIN  0x04
 #define FLAG_DATA 0x08
+#define FLAG_META 0x10
 
 /* Packet structure */
 typedef struct {
@@ -38,6 +39,12 @@ typedef struct __attribute__((packed)) {
   uint8_t flags;
   uint16_t checksum;
 } rdt_header_t;
+
+/* Metadata payload */
+typedef struct __attribute__((packed)) {
+  uint64_t file_size;
+  uint32_t total_segments;
+} meta_payload_t;
 
 /* Compute checksum (RFC1071 style) */
 uint16_t compute_checksum(const void *data, size_t len);

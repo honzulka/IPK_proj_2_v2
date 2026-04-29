@@ -36,7 +36,8 @@ Každý UDP datagram obsahuje hlavičku a payload.
 ### Payload
 
 * DATA paket: obsahuje data
-* SYN paket: může obsahovat metadata (např. velikost dat)
+* META paket: obsahuje metadata - velikost dat, celkový počet segmentů
+* SYN paket: může obsahovat metadata 
 * ACK/FIN: bez payloadu
 
 ---
@@ -49,6 +50,7 @@ Každý UDP datagram obsahuje hlavičku a payload.
 | ACK  | 0x02    | Potvrzení        |
 | FIN  | 0x04    | Ukončení spojení |
 | DATA | 0x08    | Přenos dat       |
+| META | 0x10    | Metadata         |
 
 Flagy lze kombinovat (např. SYN+ACK).
 
@@ -75,6 +77,16 @@ Flagy lze kombinovat (např. SYN+ACK).
 ---
 
 ## 5. Přenos dat
+
+### METADATA paket
+
+Prvním zaslaným paketem je tzv. META paket. Ten nese informaci o velikosti přenášeného souboru a počet segmentů.
+
+* Flag: META
+* Obsah:
+  * asdf
+
+---
 
 ### DATA pakety
 
@@ -202,18 +214,20 @@ Progress znamená:
 
 ## 13. Ukázka přenosu
 
-| Čas | Odesílatel | Flag    | seq | ack | Poznámka                   |
-| --- | ---------- | ------- | --- | --- | -------------------------- |
-| t0  | Klient     | SYN     | 0   | 0   | Zahájení spojení           |
-| t1  | Server     | SYN+ACK | 0   | 1   | Potvrzení klienta          |
-| t2  | Klient     | ACK     | 1   | 1   | Dokončení handshake        |
-| t3  | Klient     | DATA    | 1   | 1   | Segment 1                  |
-| t4  | Klient     | DATA    | 2   | 1   | Segment 2                  |
-| t5  | Server     | ACK     | -   | 2   | Potvrzen segment 1         |
-| t6  | Klient     | DATA    | 3   | 1   | Segment 3                  |
-| t7  | Server     | ACK     | -   | 3   | Potvrzen segment 2         |
-| t8  | Server     | ACK     | -   | 4   | Potvrzen segment 3         |
-| t9  | Klient     | FIN     | 4   | 4   | Konec přenosu              |
-| t10 | Server     | ACK     | -   | 5   | Potvrzení FIN              |
-| t11 | Server     | FIN     | 0   | 5   | Ukončení ze strany serveru |
-| t12 | Klient     | ACK     | 5   | 1   | Spojení ukončeno           |
+| Čas | Odesílatel | Flag    | seq | ack | Poznámka                       |
+| --- | ---------- | ------- | --- | --- | ------------------------------ |
+| t0  | Klient     | SYN     | 0   | 0   | Zahájení spojení               |
+| t1  | Server     | SYN+ACK | 0   | 1   | Potvrzení klienta              |
+| t2  | Klient     | ACK     | 1   | 1   | Dokončení handshake            |
+| t3  | Klient     | META    | 1   | 1   | Metadata (file_size, segments) |
+| t4  | Server     | ACK     | -   | 2   | Potvrzení Metadat              |
+| t5  | Klient     | DATA    | 2   | 1   | Segment 1                      |
+| t6  | Klient     | DATA    | 3   | 1   | Segment 2                      |
+| t7  | Server     | ACK     | -   | 3   | Potvrzen segment 1             |
+| t8  | Klient     | DATA    | 4   | 1   | Segment 3                      |
+| t9  | Server     | ACK     | -   | 4   | Potvrzen segment 2             |
+| t10 | Server     | ACK     | -   | 5   | Potvrzen segment 3             |
+| t11 | Klient     | FIN     | 5   | 5   | Konec přenosu                  |
+| t12 | Server     | ACK     | -   | 6   | Potvrzení FIN                  |
+| t13 | Server     | FIN     | 0   | 6   | Ukončení ze strany serveru     |
+| t14 | Klient     | ACK     | 6   | 1   | Spojení ukončeno               |
