@@ -2,7 +2,7 @@
  * @file protocol.c
  * @brief UDP Reliable Data Transfer protocol implementation.
  *
- * @author Jan Cernoch <xcernoj00> and ChatGPT (checksum functions)
+ * @author Jan Cernoch <xcernoj00>
  */
 
 #include "protocol.h"
@@ -14,18 +14,22 @@
 /* ================= CHECKSUM ================= */
 
 uint16_t compute_checksum(const void *data, size_t len) {
-  const uint8_t *buf = data;
+  const uint8_t *buf = (const uint8_t *)data;
   uint32_t sum = 0;
 
+  /* Process 2 bytes at a time (RFC 1071) */
   while (len > 1) {
-    sum += *buf++;
+    sum += ((uint16_t)buf[0] << 8) | buf[1];
+    buf += 2;
     len -= 2;
   }
 
+  /* Odd trailing byte: pad with zero on the right */
   if (len == 1) {
-    sum += *(const uint8_t *)buf;
+    sum += (uint16_t)buf[0] << 8;
   }
 
+  /* Fold 32-bit sum into 16 bits */
   while (sum >> 16)
     sum = (sum & 0xFFFF) + (sum >> 16);
 
@@ -85,7 +89,7 @@ int parse_packet(const uint8_t *buffer, size_t len, rdt_header_t *hdr_out, uint8
     return -21;
 
   /* checksum (raw) */
-  uint16_t recv_cks = ((rdt_header_t *)buffer)->checksum;
+  uint16_t recv_cks = ((const rdt_header_t *)buffer)->checksum;
   recv_cks = ntohs(recv_cks);
 
   /* copy header first */
@@ -116,8 +120,8 @@ int parse_packet(const uint8_t *buffer, size_t len, rdt_header_t *hdr_out, uint8
   if (recv_cks != calc_cks)
     return -31;
 
-  /* flags check */
-  uint8_t allowed = FLAG_SYN | FLAG_ACK | FLAG_FIN | FLAG_DATA;
+  /* flags check – all defined flags are valid */
+  uint8_t allowed = FLAG_SYN | FLAG_ACK | FLAG_FIN | FLAG_DATA | FLAG_META;
   if (hdr_out->flags & ~allowed)
     return -61;
 
