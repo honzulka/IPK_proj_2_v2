@@ -16,8 +16,8 @@
 void print_usage(const char *prog) {
   printf(
     "Usage:\n"
-    "  %s -s -p PORT [-a ADDRESS] [-o OUTPUT] [-w TIMEOUT]\n"
-    "  %s -c -a HOST -p PORT [-i INPUT] [-w TIMEOUT]\n"
+    "  %s -s -p PORT [-a ADDRESS] [-o OUTPUT] [-w TIMEOUT] [-v]\n"
+    "  %s -c -a HOST -p PORT [-i INPUT] [-w TIMEOUT] [-v]\n"
     "\n"
     "Options:\n"
     "  -s            server mode\n"
@@ -27,6 +27,7 @@ void print_usage(const char *prog) {
     "  -i INPUT      input file or - for stdin\n"
     "  -o OUTPUT     output file or - for stdout\n"
     "  -w TIMEOUT    timeout in seconds (default 1)\n"
+    "  -v            verbose debug output to stderr\n"
     "  -h            show help\n",
     prog, prog
   );
@@ -41,11 +42,12 @@ int main(int argc, char **argv) {
   int flag_client = 0;
   int flag_server = 0;
   int timeout = DEFAULT_TIMEOUT;
+  int verbose = 0;
 
   if (argc < 2) {
-      fprintf(stderr, "\nError: No arguments were specified.\n");
-      print_usage(argv[0]);
-      exit(EXIT_FAILURE);
+    fprintf(stderr, "\nError: No arguments were specified.\n");
+    print_usage(argv[0]);
+    exit(EXIT_FAILURE);
   }
 
   // Process args
@@ -92,7 +94,7 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
       }
       timeout = atoi(argv[i]);
-      if (timeout < 0) {
+      if (timeout <= 0) {
         fprintf(stderr, "\nError: Invalid timeout.\n");
         exit(EXIT_FAILURE);
       }
@@ -116,6 +118,8 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
       print_usage(argv[0]);
       exit(EXIT_SUCCESS);
+    } else if (strcmp(argv[i], "-v") == 0) {
+      verbose = 1;
     } else {
       fprintf(stderr, "\nError: Unknown argument: %s\n", argv[i]);
       print_usage(argv[0]);
@@ -151,9 +155,9 @@ int main(int argc, char **argv) {
   }
 
   if (flag_server) {
-      start_server(port, address, output, timeout);
+    start_server(port, address, output, timeout, verbose);
   } else {
-      start_client(port, address, input, timeout);
+    start_client(port, address, input, timeout, verbose);
   }
 
   return EXIT_SUCCESS;

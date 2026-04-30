@@ -17,7 +17,8 @@
  * @param address Target address
  * @param input Input FILE*
  * @param timeout Timeout in seconds
+ * @param verbose Enable debug output
  */
-void start_client(int port, const char *address, FILE *input, int timeout);
+void start_client(int port, const char *address, FILE *input, int timeout, int verbose);
 
 #endif /* CLIENT_H */

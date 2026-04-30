@@ -22,13 +22,13 @@
 #include <unistd.h>
 
 #define MAX_PAYLOAD 1100
-#define WINDOW_SIZE 5
+#define WINDOW_SIZE 16
 #define BUFFER_SIZE 1500
+#define MAX_TIMEOUTS_WITHOUT_PROGRESS 3
 
 /* ================= SEND ================= */
 
 static void send_packet(int sock, struct sockaddr *addr, socklen_t addrlen, const rdt_header_t *hdr, const uint8_t *payload) {
-
   pkt_t pkt = build_packet(hdr, payload);
   if (pkt.data) {
     sendto(sock, pkt.data, pkt.len, 0, addr, addrlen);
@@ -38,13 +38,17 @@ static void send_packet(int sock, struct sockaddr *addr, socklen_t addrlen, cons
 
 /* ================= RECV WITH TIMEOUT ================= */
 
-static ssize_t recv_timeout(int sock, uint8_t *buf, size_t len, struct sockaddr *from, socklen_t *from_len, int timeout) {
-
+static ssize_t recv_timeout(int sock, uint8_t *buf, size_t len, struct sockaddr *from, socklen_t *from_len, int timeout_s) {
   fd_set fds;
   FD_ZERO(&fds);
   FD_SET(sock, &fds);
 
-  struct timeval tv = { .tv_sec = timeout, .tv_usec = 0 };
+  if (timeout_s <= 0)
+    timeout_s = 1;
+  struct timeval tv = {
+    .tv_sec = timeout_s,
+    .tv_usec = 0
+  };
 
   int rv = select(sock + 1, &fds, NULL, NULL, &tv);
   if (rv <= 0)
@@ -55,8 +59,9 @@ static ssize_t recv_timeout(int sock, uint8_t *buf, size_t len, struct sockaddr 
 
 /* ================= CLIENT ================= */
 
-void start_client(int port, const char *address, FILE *input, int timeout) {
-  fprintf(stderr, "Starting client...\n");
+void start_client(int port, const char *address, FILE *input, int timeout, int verbose) {
+  if (verbose)
+    fprintf(stderr, "Starting client...\n");
 
   /* Seed random number generator */
   srand((unsigned)time(NULL) ^ (unsigned)getpid());
@@ -93,13 +98,15 @@ void start_client(int port, const char *address, FILE *input, int timeout) {
 
   rdt_header_t rh;
   ssize_t n;
+  int timeouts_without_progress = 0;
 
   uint32_t conn_id = (uint32_t)rand();
   if (conn_id == 0) conn_id = 1; /* avoid zero conn_id */
 
   /* ================= HANDSHAKE ================= */
 
-  fprintf(stderr, "Starting handshake...\n");
+  if (verbose)
+    fprintf(stderr, "Starting handshake...\n");
 
   while (1) {
     rdt_header_t syn = {
@@ -114,8 +121,14 @@ void start_client(int port, const char *address, FILE *input, int timeout) {
 
     n = recv_timeout(sock, buffer, sizeof(buffer), (struct sockaddr *)&from, &from_len, timeout);
 
-    if (n <= 0)
+    if (n <= 0) {
+      if (++timeouts_without_progress >= MAX_TIMEOUTS_WITHOUT_PROGRESS) {
+        fprintf(stderr, "ERROR: Timeout without progress during handshake\n");
+        close(sock);
+        exit(EXIT_FAILURE);
+      }
       continue;
+    }
 
     if (parse_packet(buffer, (size_t)n, &rh, NULL) != 0)
       continue;
@@ -124,8 +137,10 @@ void start_client(int port, const char *address, FILE *input, int timeout) {
     if (rh.conn_id != conn_id)
       continue;
 
-    if ((rh.flags & (FLAG_SYN | FLAG_ACK)) == (FLAG_SYN | FLAG_ACK))
+    if ((rh.flags & (FLAG_SYN | FLAG_ACK)) == (FLAG_SYN | FLAG_ACK)) {
+      timeouts_without_progress = 0;
       break;
+    }
   }
 
   /* Final ACK completing 3-way handshake */
@@ -182,7 +197,8 @@ void start_client(int port, const char *address, FILE *input, int timeout) {
     .total_segments  = htonl(total)
   };
 
-  fprintf(stderr, "Sending META (file_size=%zu, segments=%u)...\n", file_size, total);
+  if (verbose)
+    fprintf(stderr, "Sending META (file_size=%zu, segments=%u)...\n", file_size, total);
 
   while (1) {
     rdt_header_t mh = {
@@ -197,8 +213,15 @@ void start_client(int port, const char *address, FILE *input, int timeout) {
 
     n = recv_timeout(sock, buffer, sizeof(buffer), (struct sockaddr *)&from, &from_len, timeout);
 
-    if (n <= 0)
+    if (n <= 0) {
+      if (++timeouts_without_progress >= MAX_TIMEOUTS_WITHOUT_PROGRESS) {
+        fprintf(stderr, "ERROR: Timeout without progress during metadata transfer\n");
+        free(file);
+        close(sock);
+        exit(EXIT_FAILURE);
+      }
       continue;
+    }
 
     if (parse_packet(buffer, (size_t)n, &rh, NULL) != 0)
       continue;
@@ -207,8 +230,10 @@ void start_client(int port, const char *address, FILE *input, int timeout) {
       continue;
 
     /* Server ACKs META with ack = META_seq + 1 = 1 + 1 = 2 */
-    if ((rh.flags & FLAG_ACK) && rh.ack == 2)
+    if ((rh.flags & FLAG_ACK) && rh.ack == 2) {
+      timeouts_without_progress = 0;
       break;
+    }
   }
 
   /* ================= GO-BACK-N DATA TRANSFER ================= */
@@ -216,7 +241,8 @@ void start_client(int port, const char *address, FILE *input, int timeout) {
   uint32_t base = 2;
   uint32_t next = 2;
 
-  fprintf(stderr, "Sending data (%u segment(s))...\n", total);
+  if (verbose)
+    fprintf(stderr, "Sending data (%u segment(s))...\n", total);
 
   while (base < total + 2) {
 
@@ -244,6 +270,12 @@ void start_client(int port, const char *address, FILE *input, int timeout) {
     n = recv_timeout(sock, buffer, sizeof(buffer), (struct sockaddr *)&from, &from_len, timeout);
 
     if (n <= 0) {
+      if (++timeouts_without_progress >= MAX_TIMEOUTS_WITHOUT_PROGRESS) {
+        fprintf(stderr, "ERROR: Timeout without progress during data transfer\n");
+        free(file);
+        close(sock);
+        exit(EXIT_FAILURE);
+      }
       /* Timeout: Go-Back-N retransmit from base */
       next = base;
       continue;
@@ -256,8 +288,12 @@ void start_client(int port, const char *address, FILE *input, int timeout) {
       continue;
 
     if (rh.flags & FLAG_ACK) {
-      if (rh.ack > base)
+      if (rh.ack > total + 2) {
+        /* ignore invalid cumulative ACK */
+      } else if (rh.ack > base) {
         base = rh.ack;
+        timeouts_without_progress = 0;
+      }
     }
   }
 
@@ -265,28 +301,30 @@ void start_client(int port, const char *address, FILE *input, int timeout) {
 
   /* ================= FIN (4-way teardown) ================= */
 
-  fprintf(stderr, "Sending FIN...\n");
+  if (verbose)
+    fprintf(stderr, "Sending FIN...\n");
 
   int fin_acked = 0;
 
   while (1) {
-    if (!fin_acked) {
-      rdt_header_t fin = {
-        .conn_id = conn_id,
-        .seq = total + 2,
-        .ack = 0,
-        .len = 0,
-        .flags = FLAG_FIN
-      };
-      send_packet(sock, (struct sockaddr *)&srv, srv_len, &fin, NULL);
-    }
+    rdt_header_t fin = {
+      .conn_id = conn_id,
+      .seq = total + 2,
+      .ack = 0,
+      .len = 0,
+      .flags = FLAG_FIN
+    };
+    send_packet(sock, (struct sockaddr *)&srv, srv_len, &fin, NULL);
 
     n = recv_timeout(sock, buffer, sizeof(buffer), (struct sockaddr *)&from, &from_len, timeout);
 
     if (n <= 0) {
-      if (fin_acked)
-        break; /* timeout after ACK: server closed, we're done */
-      continue; /* timeout before ACK: resend FIN */
+      if (++timeouts_without_progress >= MAX_TIMEOUTS_WITHOUT_PROGRESS) {
+        fprintf(stderr, "ERROR: Timeout without progress during session termination\n");
+        close(sock);
+        exit(EXIT_FAILURE);
+      }
+      continue;
     }
 
     if (parse_packet(buffer, (size_t)n, &rh, NULL) != 0)
@@ -295,8 +333,10 @@ void start_client(int port, const char *address, FILE *input, int timeout) {
     if (rh.conn_id != conn_id)
       continue;
 
-    if (rh.flags & FLAG_ACK)
+    if ((rh.flags & FLAG_ACK) && !fin_acked) {
       fin_acked = 1;
+      timeouts_without_progress = 0;
+    }
 
     if (rh.flags & FLAG_FIN) {
       /* Server's FIN: send final ACK and close */
@@ -308,10 +348,12 @@ void start_client(int port, const char *address, FILE *input, int timeout) {
         .flags = FLAG_ACK
       };
       send_packet(sock, (struct sockaddr *)&srv, srv_len, &final_ack, NULL);
+      timeouts_without_progress = 0;
       break;
     }
   }
 
-  fprintf(stderr, "Transfer complete.\n");
+  if (verbose)
+    fprintf(stderr, "Transfer complete.\n");
   close(sock);
 }

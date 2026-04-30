@@ -17,7 +17,8 @@
  * @param address Bind address (NULL = all)
  * @param output Output FILE*
  * @param timeout Timeout in seconds
+ * @param verbose Enable debug output
  */
-void start_server(int port, const char *address, FILE *output, int timeout);
+void start_server(int port, const char *address, FILE *output, int timeout, int verbose);
 
 #endif /* SERVER_H */

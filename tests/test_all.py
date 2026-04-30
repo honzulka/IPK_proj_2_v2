@@ -1,556 +1,546 @@
 #!/usr/bin/env python3
 """
-@file test_all.py
-@brief Unified test suite for the ICMP covert channel project.
-
-@author Jan Cernoch <xcernoj00> + ChatGPT
+Unified automated tests for IPK Project 2 (ipk-rdt).
 """
 
-import os
-import sys
-import time
-import struct
-import socket
-import subprocess
-import tempfile
 import hashlib
+import os
+import random
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
 from pathlib import Path
 
-# ANSI colors
 GREEN = "\033[32m"
 RED = "\033[31m"
 YELLOW = "\033[33m"
 RESET = "\033[0m"
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-BINARY = str(PROJECT_ROOT / "secret")
+BINARY = PROJECT_ROOT / "ipk-rdt"
+PROTOCOL_H = PROJECT_ROOT / "src" / "protocol.h"
 
-# ------------------------- Common helpers -------------------------
+FLAG_SYN = 0x01
+FLAG_ACK = 0x02
+FLAG_FIN = 0x04
+FLAG_DATA = 0x08
+FLAG_META = 0x10
 
-def print_header(title: str):
-    print("=" * 70)
-    print(title)
-    print("=" * 70)
-    print()
-
-def ensure_binary():
-    if not Path(BINARY).exists():
-        print(f"{RED}Error:{RESET} Binary '{BINARY}' not found! Run 'make' first.")
-        sys.exit(1)
-
-def start_server(verbose=False):
-    args = [BINARY, "-l"]
-    if verbose:
-        args.append("-v")
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=str(PROJECT_ROOT))
-    time.sleep(1)
-    return proc
-
-def stop_server(proc):
-    if proc and proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=2)
-        except Exception:
-            proc.kill()
-
-# ------------------------- Arguments tests -------------------------
-
-def run_cmd(args, timeout=3):
-    try:
-        res = subprocess.run([BINARY] + args, capture_output=True, text=True, timeout=timeout, cwd=str(PROJECT_ROOT))
-        return res.returncode, res.stdout, res.stderr
-    except subprocess.TimeoutExpired:
-        return -1, "", "TIMEOUT"
+RDT_HDR_FMT = "!IIIHBH"
+RDT_HDR_SIZE = struct.calcsize(RDT_HDR_FMT)
 
 
-def arguments_suite(verbose=False):
-    print_header("Argument Parsing Tests")
-    passed = failed = 0
-
-    def ok(msg):
-        nonlocal passed
-        print(f"  {GREEN}✓{RESET} {msg}\n")
-        passed += 1
-
-    def bad(msg):
-        nonlocal failed
-        print(f"  {RED}✗ FAILED{RESET}: {msg}\n")
-        failed += 1
-
-    # No args
-    print("Test: No arguments")
-    rc, out, err = run_cmd([])
-    if rc != 0 and ("No arguments" in out or "No arguments" in err):
-        ok("Correctly rejects no arguments")
-    else:
-        bad("Should fail with no arguments")
-
-    # -h
-    print("Test: -h (help)")
-    rc, out, err = run_cmd(["-h"])
-    if rc == 0 and ("Usage:" in out or "Usage:" in err):
-        ok("Help message displayed")
-    else:
-        bad("Help should return success and show usage")
-
-    # -v alone
-    print("Test: -v alone")
-    rc, out, err = run_cmd(["-v"])
-    if rc != 0:
-        ok("Correctly rejects verbose flag alone")
-    else:
-        bad("Should fail with only -v")
-
-    # -l
-    print("Test: -l (listen mode)")
-    try:
-        proc = subprocess.Popen([BINARY, "-l"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=str(PROJECT_ROOT))
-        time.sleep(0.5)
-        proc.terminate()
-        proc.wait(timeout=1)
-        ok("Listen mode starts without immediate crash")
-    except Exception as e:
-        print(f"  {YELLOW}⚠{RESET} Could not test listen mode quickly: {e}\n")
-
-    # -s without -r
-    print("Test: -s without -r (missing filename)")
-    rc, out, err = run_cmd(["-s", "127.0.0.1"]) 
-    if rc != 0 and ("File not specified" in out or "File not specified" in err):
-        ok("Correctly requires filename")
-    else:
-        ok("Correctly rejects -s without -r")  # be lenient to message wording
-
-    # -r without -s
-    print("Test: -r without -s (missing target)")
-    rc, out, err = run_cmd(["-r", "test.txt"]) 
-    if rc != 0 and ("Target" in out or "Target" in err):
-        ok("Correctly requires target")
-    else:
-        bad("Should fail without target")
-
-    # missing values
-    print("Test: -r without value")
-    rc, out, err = run_cmd(["-r"]) 
-    ok("Correctly rejects -r without value") if rc != 0 else bad("Should fail when -r value missing")
-
-    print("Test: -s without value")
-    rc, out, err = run_cmd(["-s"]) 
-    ok("Correctly rejects -s without value") if rc != 0 else bad("Should fail when -s value missing")
-
-    # conflicts
-    print("Test: -l with -r (conflict)")
-    rc, out, err = run_cmd(["-l", "-r", "test.txt"]) 
-    ok("Correctly rejects -l with -r") if rc != 0 else bad("Should fail when combining -l with -r")
-
-    print("Test: -l with -s (conflict)")
-    rc, out, err = run_cmd(["-l", "-s", "127.0.0.1"]) 
-    ok("Correctly rejects -l with -s") if rc != 0 else bad("Should fail when combining -l with -s")
-
-    # unknown arg
-    print("Test: Unknown argument")
-    rc, out, err = run_cmd(["-x"]) 
-    ok("Correctly rejects unknown argument") if rc != 0 else bad("Should fail with unknown arg")
-
-    # invalid hostname
-    print("Test: Invalid hostname")
-    rc, out, err = run_cmd(["-r", "test.txt", "-s", "invalid..host..name"]) 
-    ok("Correctly rejects invalid hostname") if rc != 0 else bad("Should fail with invalid hostname")
-
-    # non-existent file
-    print("Test: Non-existent file")
-    rc, out, err = run_cmd(["-r", "/tmp/nonexistent_abc.txt", "-s", "127.0.0.1"]) 
-    ok("Correctly rejects non-existent file") if rc != 0 else bad("Should fail with non-existent file")
-
-    # valid IPv4/IPv6/hostname (argument acceptance)
-    test_file = "/tmp/all_tests_ipv4.txt"
-    with open(test_file, "w") as f:
-        f.write("test")
-    print("Test: Valid IPv4 address (127.0.0.1)")
-    rc, out, err = run_cmd(["-r", test_file, "-s", "127.0.0.1", "-v"]) 
-    if "Invalid target" not in out and "Invalid target" not in err:
-        ok("Accepts valid IPv4 address")
-    else:
-        bad("IPv4 address should be accepted")
-    os.remove(test_file)
-
-    test_file = "/tmp/all_tests_ipv6.txt"
-    with open(test_file, "w") as f:
-        f.write("test")
-    print("Test: Valid IPv6 address (::1)")
-    rc, out, err = run_cmd(["-r", test_file, "-s", "::1", "-v"]) 
-    if "Invalid target" not in out and "Invalid target" not in err:
-        ok("Accepts valid IPv6 address")
-    else:
-        bad("IPv6 address should be accepted")
-    os.remove(test_file)
-
-    test_file = "/tmp/all_tests_host.txt"
-    with open(test_file, "w") as f:
-        f.write("test")
-    print("Test: Valid hostname (localhost)")
-    rc, out, err = run_cmd(["-r", test_file, "-s", "localhost", "-v"]) 
-    if "Invalid target" not in out and "Invalid target" not in err:
-        ok("Accepts valid hostname")
-    else:
-        bad("Hostname should be accepted")
-    os.remove(test_file)
-
-    print("=" * 70)
-    print(f"Results: {GREEN}{passed} passed{RESET}, {RED}{failed} failed{RESET}")
-    print("=" * 70)
-    print()
-
-    return passed, failed, 0
-
-# ------------------------- Protocol tests -------------------------
-
-CLIENT_ID = 0x1234
-SERVER_ID = 0x4321
-CUSTOM_HEADER_FMT = '!BIIQ'
-CUSTOM_HEADER_LEN = struct.calcsize(CUSTOM_HEADER_FMT)
-
-class ICMPProtocolTester:
-    def __init__(self, target="127.0.0.1", verbose=False):
-        self.target = target
-        self.verbose = verbose
-        self.seq_num = 1
-
-    def log(self, msg):
-        if self.verbose:
-            print(f"  {msg}")
-
-    def create_custom_header(self, flag, fragment_num, total_fragments, file_size):
-        return struct.pack(CUSTOM_HEADER_FMT, flag, fragment_num, total_fragments, file_size)
-
-    def calculate_checksum(self, data):
-        if len(data) % 2 == 1:
-            data += b'\x00'
-        s = sum(struct.unpack('!%dH' % (len(data)//2), data))
-        s = (s >> 16) + (s & 0xffff)
-        s += s >> 16
-        return ~s & 0xffff
-
-    def create_icmp_echo(self, is_client, custom_flag, payload=b''):
-        icmp_type = 8
-        icmp_code = 0
-        icmp_checksum = 0
-        icmp_id = CLIENT_ID if is_client else SERVER_ID
-        icmp_seq = self.seq_num
-        custom_hdr = self.create_custom_header(custom_flag, 0, 0, 0)
-        header = struct.pack('!BBHHH', icmp_type, icmp_code, icmp_checksum, icmp_id, icmp_seq)
-        packet = header + custom_hdr + payload
-        checksum = self.calculate_checksum(packet)
-        header = struct.pack('!BBHHH', icmp_type, icmp_code, checksum, icmp_id, icmp_seq)
-        self.seq_num += 1
-        return header + custom_hdr + payload
-
-    def send_hello(self, sock):
-        pkt = self.create_icmp_echo(True, 0)
-        sock.sendto(pkt, (self.target, 0))
-        return True
-
-    def wait_for_reply(self, sock, expected_flag, timeout=5):
-        end = time.time() + timeout
-        while time.time() < end:
-            sock.settimeout(max(0.0, end - time.time()))
-            try:
-                data, addr = sock.recvfrom(1500)
-                ip_hl = (data[0] & 0x0F) * 4
-                if len(data) < ip_hl + 8:
-                    continue
-                icmp_data = data[ip_hl:]
-                icmp_type, icmp_code, checksum, icmp_id, icmp_seq = struct.unpack('!BBHHH', icmp_data[:8])
-                if icmp_type != 8 or icmp_id != SERVER_ID:
-                    continue
-                if len(icmp_data) < 8 + CUSTOM_HEADER_LEN:
-                    continue
-                flag, frag_num, total_frags, file_size = struct.unpack(CUSTOM_HEADER_FMT, icmp_data[8:8+CUSTOM_HEADER_LEN])
-                if flag == expected_flag:
-                    return True
-            except socket.timeout:
-                break
-            except Exception:
-                break
-        return False
-
-def protocol_suite(verbose=False):
-    print_header("Protocol Tests")
-    passed = failed = skipped = 0
-
-    if os.geteuid() != 0:
-        print(f"{YELLOW}⚠ SKIPPED{RESET}: Protocol tests require root privileges\n")
-        return passed, failed, 3
-
-    server = start_server(verbose)
-    try:
-        # HELLO -> READY
-        print("Test: HELLO → READY handshake")
-        tester = ICMPProtocolTester(verbose=verbose)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-        tester.send_hello(sock)
-        if tester.wait_for_reply(sock, 1):
-            print(f"  {GREEN}✓{RESET} HELLO → READY handshake works\n")
-            passed += 1
-        else:
-            print(f"  {RED}✗ FAILED{RESET}: No READY response\n")
-            failed += 1
-        sock.close()
-
-        # Invalid packet wrong ID
-        print("Test: Invalid packet (wrong ID)")
-        sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-        icmp_type, icmp_code, icmp_id, icmp_seq = 8, 0, 0xFFFF, 1
-        header = struct.pack('!BBHHH', icmp_type, icmp_code, 0, icmp_id, icmp_seq)
-        packet = header + b'test'
-        # checksum
-        tester = ICMPProtocolTester()
-        checksum = tester.calculate_checksum(packet)
-        header = struct.pack('!BBHHH', icmp_type, icmp_code, checksum, icmp_id, icmp_seq)
-        sock.sendto(header + b'test', ("127.0.0.1", 0))
-        sock.settimeout(1.5)
-        try:
-            sock.recvfrom(1500)
-        except socket.timeout:
-            pass
-        sock.close()
-        print(f"  {GREEN}✓{RESET} Server ignores packets with wrong ID\n")
-        passed += 1
-
-        # Out of order
-        print("Test: Out of order packets (META before HELLO)")
-        sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-        icmp_type, icmp_code, icmp_id, icmp_seq = 8, 0, CLIENT_ID, 2
-        custom_hdr = struct.pack(CUSTOM_HEADER_FMT, 3, 0, 1, 100)
-        header = struct.pack('!BBHHH', icmp_type, icmp_code, 0, icmp_id, icmp_seq)
-        pkt = header + custom_hdr + b"file.txt"
-        checksum = tester.calculate_checksum(pkt)
-        header = struct.pack('!BBHHH', icmp_type, icmp_code, checksum, icmp_id, icmp_seq)
-        sock.sendto(header + custom_hdr + b"file.txt", ("127.0.0.1", 0))
-        sock.settimeout(1.5)
-        try:
-            sock.recvfrom(1500)
-        except socket.timeout:
-            pass
-        sock.close()
-        print(f"  {GREEN}✓{RESET} Server handles out-of-order packets gracefully\n")
-        passed += 1
-
-    finally:
-        stop_server(server)
-
-    print("=" * 70)
-    print(f"Results: {GREEN}{passed} passed{RESET}, {RED}{failed} failed{RESET}, {YELLOW}{skipped} skipped{RESET}")
-    print("=" * 70)
-    print()
-    return passed, failed, skipped
-
-# ------------------------- Integration tests -------------------------
-
-def md5sum(path):
+def md5_bytes(data: bytes) -> str:
     h = hashlib.md5()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(4096), b""):
-            h.update(chunk)
+    h.update(data)
     return h.hexdigest()
 
 
-def create_file(path, size):
-    with open(path, "wb") as f:
-        f.write(os.urandom(size))
+def random_bytes(size: int) -> bytes:
+    return os.urandom(size)
 
 
-def integration_suite(verbose=False):
-    print_header("Integration Tests")
+def print_header(title: str) -> None:
+    print("=" * 72)
+    print(title)
+    print("=" * 72)
 
-    if os.geteuid() != 0:
-        print(f"{YELLOW}⚠ SKIPPED{RESET}: Integration tests require root privileges\n")
-        return 0, 0, 5
 
-    passed = failed = skipped = 0
+def ok(msg: str) -> None:
+    print(f"  {GREEN}✓{RESET} {msg}")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # small file
-        print("Test: Small file (100 bytes)")
-        server = start_server(verbose)
+
+def fail(msg: str) -> None:
+    print(f"  {RED}✗ FAILED{RESET}: {msg}")
+
+
+def skip(msg: str) -> None:
+    print(f"  {YELLOW}⚠ SKIPPED{RESET}: {msg}")
+
+
+def ensure_binary() -> None:
+    if not BINARY.exists():
+        print(f"{RED}Error:{RESET} Binary '{BINARY}' not found. Run 'make' first.")
+        sys.exit(1)
+
+
+def run_cmd(args, timeout=5):
+    return subprocess.run(
+        [str(BINARY)] + args,
+        cwd=str(PROJECT_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+    )
+
+
+def free_port(family: int) -> int:
+    with socket.socket(family, socket.SOCK_DGRAM) as s:
+        if family == socket.AF_INET6:
+            s.bind(("::1", 0))
+        else:
+            s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def checksum16(data: bytes) -> int:
+    if len(data) % 2 == 1:
+        data += b"\x00"
+    s = 0
+    for i in range(0, len(data), 2):
+        s += (data[i] << 8) | data[i + 1]
+    while s >> 16:
+        s = (s & 0xFFFF) + (s >> 16)
+    return (~s) & 0xFFFF
+
+
+def build_rdt_packet(conn_id: int, seq: int, ack: int, flags: int, payload: bytes = b"", len_override: int | None = None) -> bytes:
+    payload_len = len(payload) if len_override is None else len_override
+    hdr_wo_cks = struct.pack(RDT_HDR_FMT, conn_id, seq, ack, payload_len, flags, 0)
+    cks = checksum16(hdr_wo_cks + payload)
+    hdr = struct.pack(RDT_HDR_FMT, conn_id, seq, ack, payload_len, flags, cks)
+    return hdr + payload
+
+
+def parse_rdt_header(pkt: bytes):
+    if len(pkt) < RDT_HDR_SIZE:
+        return None
+    conn_id, seq, ack, plen, flags, cks = struct.unpack(RDT_HDR_FMT, pkt[:RDT_HDR_SIZE])
+    return {"conn_id": conn_id, "seq": seq, "ack": ack, "len": plen, "flags": flags, "checksum": cks}
+
+
+def recv_packet(sock: socket.socket, timeout: float = 1.0):
+    sock.settimeout(timeout)
+    data, _ = sock.recvfrom(2048)
+    return parse_rdt_header(data), data
+
+
+def run_transfer(
+    *,
+    host: str,
+    family: int,
+    input_data: bytes,
+    client_input_mode: str,
+    server_output_mode: str,
+    server_bind: str | None = None,
+    timeout: int = 1,
+    transfer_timeout: int = 20,
+    inject_malformed: bool = False,
+):
+    port = free_port(family)
+
+    with tempfile.TemporaryDirectory(prefix="ipk-rdt-test-") as td:
+        td_path = Path(td)
+        in_file = td_path / "input.bin"
+        out_file = td_path / "output.bin"
+
+        if client_input_mode == "file":
+            in_file.write_bytes(input_data)
+            client_stdin = None
+            client_args = ["-c", "-a", host, "-p", str(port), "-i", str(in_file), "-w", str(timeout)]
+        else:
+            client_stdin = input_data
+            client_args = ["-c", "-a", host, "-p", str(port), "-i", "-", "-w", str(timeout)]
+
+        server_args = ["-s", "-p", str(port), "-w", str(timeout)]
+        if server_bind is not None:
+            server_args.extend(["-a", server_bind])
+        if server_output_mode == "file":
+            server_args.extend(["-o", str(out_file)])
+
+        server = subprocess.Popen(
+            [str(BINARY)] + server_args,
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
         try:
-            src = Path(tmpdir) / "small.txt"
-            create_file(src, 100)
-            h_src = md5sum(src)
-            rc, out, err = run_cmd(["-r", str(src), "-s", "127.0.0.1"]) 
-            dst = PROJECT_ROOT / "small.txt"
-            if dst.exists() and md5sum(dst) == h_src:
-                print(f"  {GREEN}✓{RESET} File transferred and hashes match\n")
-                dst.unlink()
-                passed += 1
-            else:
-                print(f"  {RED}✗ FAILED{RESET}: Small file transfer failed\n")
-                failed += 1
-        finally:
-            stop_server(server)
+            time.sleep(0.2)
 
-        # medium file
-        print("Test: Medium file (10 KB)")
-        server = start_server(verbose)
+            if inject_malformed:
+                send_malformed_packets(host, port, family, count=60)
+
+            client = subprocess.Popen(
+                [str(BINARY)] + client_args,
+                cwd=str(PROJECT_ROOT),
+                stdin=subprocess.PIPE if client_input_mode == "stdin" else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            try:
+                c_out, c_err = client.communicate(input=client_stdin, timeout=transfer_timeout)
+            except subprocess.TimeoutExpired:
+                client.kill()
+                c_out, c_err = client.communicate()
+                raise RuntimeError(f"client timeout, stderr={c_err.decode(errors='replace')}")
+
+            try:
+                s_out, s_err = server.communicate(timeout=transfer_timeout)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                s_out, s_err = server.communicate()
+                raise RuntimeError(f"server timeout, stderr={s_err.decode(errors='replace')}")
+
+            if client.returncode != 0:
+                raise RuntimeError(f"client rc={client.returncode}, stderr={c_err.decode(errors='replace')}")
+            if server.returncode != 0:
+                raise RuntimeError(f"server rc={server.returncode}, stderr={s_err.decode(errors='replace')}")
+
+            if server_output_mode == "file":
+                if not out_file.exists():
+                    raise RuntimeError("server output file was not created")
+                got = out_file.read_bytes()
+            else:
+                got = s_out
+
+            return got, c_out, c_err, s_err
+        finally:
+            if server.poll() is None:
+                server.terminate()
+                try:
+                    server.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+
+
+def send_malformed_packets(host: str, port: int, family: int, count: int) -> None:
+    for _ in range(count):
+        if family == socket.AF_INET6:
+            with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as s:
+                s.sendto(os.urandom(random.randint(1, 64)), (host, port))
+        else:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.sendto(os.urandom(random.randint(1, 64)), (host, port))
+
+
+def read_define_int(path: Path, name: str):
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line.startswith(f"#define {name} "):
+            return int(line.split()[-1])
+    return None
+
+
+def cli_suite():
+    print_header("CLI / argument behavior")
+    p = f = 0
+
+    r = run_cmd(["-h"], timeout=3)
+    if r.returncode == 0 and b"Usage:" in r.stdout:
+        ok("-h returns 0 and prints usage")
+        p += 1
+    else:
+        fail("-h behavior mismatch")
+        f += 1
+
+    r = run_cmd([], timeout=3)
+    if r.returncode != 0:
+        ok("no-arg invocation fails")
+        p += 1
+    else:
+        fail("no-arg invocation should fail")
+        f += 1
+
+    r = run_cmd(["-c", "-p", "9000"], timeout=3)
+    if r.returncode != 0 and b"-a HOST is required" in r.stderr:
+        ok("client rejects missing -a")
+        p += 1
+    else:
+        fail("client missing -a should fail with stderr error")
+        f += 1
+
+    r = run_cmd(["-c", "-s", "-a", "127.0.0.1", "-p", "9000"], timeout=3)
+    if r.returncode != 0:
+        ok("mutually exclusive -c/-s enforced")
+        p += 1
+    else:
+        fail("simultaneous -c and -s should fail")
+        f += 1
+
+    return p, f, 0
+
+
+def protocol_limits_suite():
+    print_header("Protocol static limits")
+    p = f = 0
+
+    max_payload = read_define_int(PROTOCOL_H, "MAX_PAYLOAD_SIZE")
+    header_size = read_define_int(PROTOCOL_H, "RDT_HEADER_SIZE")
+    if max_payload is None or header_size is None:
+        fail("cannot read protocol size defines")
+        return 0, 1, 0
+
+    if max_payload + header_size <= 1200:
+        ok(f"MAX_PAYLOAD_SIZE + RDT_HEADER_SIZE <= 1200 ({max_payload + header_size})")
+        p += 1
+    else:
+        fail(f"UDP payload exceeds 1200 ({max_payload + header_size})")
+        f += 1
+
+    return p, f, 0
+
+
+def transfer_suite():
+    print_header("Transfer scenarios (correctness)")
+    p = f = 0
+
+    cases = [
+        ("IPv4 file->file small binary", dict(host="127.0.0.1", family=socket.AF_INET, input_data=random_bytes(1024), client_input_mode="file", server_output_mode="file", server_bind="127.0.0.1")),
+        ("IPv6 file->file small binary", dict(host="::1", family=socket.AF_INET6, input_data=random_bytes(1024), client_input_mode="file", server_output_mode="file", server_bind="::1")),
+        ("empty input file->file", dict(host="127.0.0.1", family=socket.AF_INET, input_data=b"", client_input_mode="file", server_output_mode="file", server_bind="127.0.0.1")),
+        ("stdin->file", dict(host="127.0.0.1", family=socket.AF_INET, input_data=random_bytes(4096), client_input_mode="stdin", server_output_mode="file", server_bind="127.0.0.1")),
+        ("file->stdout", dict(host="127.0.0.1", family=socket.AF_INET, input_data=random_bytes(4096), client_input_mode="file", server_output_mode="stdout", server_bind="127.0.0.1")),
+        ("stdin->stdout", dict(host="127.0.0.1", family=socket.AF_INET, input_data=random_bytes(4096), client_input_mode="stdin", server_output_mode="stdout", server_bind="127.0.0.1")),
+        ("default bind accepts IPv6 client", dict(host="::1", family=socket.AF_INET6, input_data=random_bytes(2048), client_input_mode="file", server_output_mode="file", server_bind=None)),
+    ]
+
+    for name, kwargs in cases:
         try:
-            src = Path(tmpdir) / "medium.bin"
-            create_file(src, 10 * 1024)
-            h_src = md5sum(src)
-            rc, out, err = run_cmd(["-r", str(src), "-s", "127.0.0.1"]) 
-            dst = PROJECT_ROOT / "medium.bin"
-            if dst.exists() and md5sum(dst) == h_src:
-                print(f"  {GREEN}✓{RESET} File transferred successfully\n")
-                dst.unlink()
-                passed += 1
+            got, _, _, s_err = run_transfer(**kwargs, transfer_timeout=25)
+            if got == kwargs["input_data"]:
+                if kwargs["server_output_mode"] == "stdout" and b"META received" in got:
+                    fail(f"{name}: payload polluted by log text")
+                    f += 1
+                else:
+                    ok(name)
+                    p += 1
             else:
-                print(f"  {RED}✗ FAILED{RESET}: Medium file transfer failed\n")
-                failed += 1
-        finally:
-            stop_server(server)
+                fail(f"{name}: payload mismatch (in={md5_bytes(kwargs['input_data'])}, out={md5_bytes(got)})")
+                f += 1
+                if s_err:
+                    print("    server stderr:", s_err.decode(errors="replace").strip())
+        except Exception as e:
+            fail(f"{name}: {e}")
+            f += 1
 
-        # large file
-        print("Test: Large file (1 MB)")
-        server = start_server(verbose)
+    return p, f, 0
+
+
+def malformed_noise_during_valid_transfer():
+    data = random_bytes(64 * 1024)
+    got, _, _, _ = run_transfer(
+        host="127.0.0.1",
+        family=socket.AF_INET,
+        input_data=data,
+        client_input_mode="file",
+        server_output_mode="file",
+        server_bind="127.0.0.1",
+        inject_malformed=True,
+        transfer_timeout=30,
+    )
+    return got == data
+
+
+def malformed_duplicate_out_of_order_bad_meta():
+    port = free_port(socket.AF_INET)
+    with tempfile.TemporaryDirectory(prefix="ipk-rdt-malformed-") as td:
+        out_path = Path(td) / "out.bin"
+        server = subprocess.Popen(
+            [str(BINARY), "-s", "-a", "127.0.0.1", "-p", str(port), "-o", str(out_path), "-w", "2"],
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(1.0)
+        conn_id = random.randint(1, 0xFFFFFFFE)
+        target = ("127.0.0.1", port)
         try:
-            src = Path(tmpdir) / "large.bin"
-            create_file(src, 1024 * 1024)
-            h_src = md5sum(src)
-            rc, out, err = run_cmd(["-r", str(src), "-s", "127.0.0.1"], timeout=300) 
-            dst = PROJECT_ROOT / "large.bin"
-            if dst.exists() and md5sum(dst) == h_src:
-                print(f"  {GREEN}✓{RESET} File transferred successfully\n")
-                dst.unlink()
-                passed += 1
-            else:
-                print(f"  {RED}✗ FAILED{RESET}: Large file transfer failed\n")
-                if err:
-                    last_lines = "\n".join(err.strip().splitlines()[-5:])
-                    print(f"  Last 5 lines of stderr:\n{last_lines}")
-                elif out:
-                    last_lines = "\n".join(out.strip().splitlines()[-5:])
-                    print(f"  Last 5 lines of stdout:\n{last_lines}")
+            time.sleep(0.1)
 
-                failed += 1
+            sock.sendto(build_rdt_packet(conn_id, 0, 0, FLAG_SYN), target)
+            synack = None
+            deadline = time.time() + 2.5
+            while time.time() < deadline:
+                hdr, _ = recv_packet(sock, timeout=0.5)
+                if hdr and hdr["conn_id"] == conn_id and (hdr["flags"] & (FLAG_SYN | FLAG_ACK)) == (FLAG_SYN | FLAG_ACK):
+                    synack = hdr
+                    break
+            if synack is None:
+                return False
+
+            sock.sendto(build_rdt_packet(conn_id, 0, 0, FLAG_SYN), target)  # duplicate SYN
+            sock.sendto(build_rdt_packet(conn_id, 1, synack["seq"] + 1, FLAG_ACK), target)
+
+            # malformed META (len says more than payload actually contains)
+            bad_meta_payload = struct.pack("!QI", 2, 2)
+            sock.sendto(build_rdt_packet(conn_id, 1, 1, FLAG_META, bad_meta_payload, len_override=len(bad_meta_payload) + 4), target)
+
+            # valid META
+            sock.sendto(build_rdt_packet(conn_id, 1, 1, FLAG_META, bad_meta_payload), target)
+
+            # corrupted checksum DATA (must be ignored)
+            bad_data = bytearray(build_rdt_packet(conn_id, 2, 0, FLAG_DATA, b"A"))
+            bad_data[-1] ^= 0xFF
+            sock.sendto(bytes(bad_data), target)
+
+            # out-of-order DATA first
+            sock.sendto(build_rdt_packet(conn_id, 3, 0, FLAG_DATA, b"B"), target)
+            sock.sendto(build_rdt_packet(conn_id, 2, 0, FLAG_DATA, b"A"), target)
+            sock.sendto(build_rdt_packet(conn_id, 2, 0, FLAG_DATA, b"A"), target)  # duplicate DATA
+            sock.sendto(build_rdt_packet(conn_id, 3, 0, FLAG_DATA, b"B"), target)
+
+            # FIN + wait for server FIN
+            fin_seq = 4
+            got_server_fin = False
+            for _ in range(8):
+                sock.sendto(build_rdt_packet(conn_id, fin_seq, 0, FLAG_FIN), target)
+                try:
+                    hdr, _ = recv_packet(sock, timeout=0.5)
+                except socket.timeout:
+                    continue
+                if not hdr or hdr["conn_id"] != conn_id:
+                    continue
+                if hdr["flags"] & FLAG_FIN:
+                    sock.sendto(build_rdt_packet(conn_id, fin_seq + 1, hdr["seq"] + 1, FLAG_ACK), target)
+                    got_server_fin = True
+                    break
+
+            if not got_server_fin:
+                return False
+
+            s_out, s_err = server.communicate(timeout=5)
+            if server.returncode != 0:
+                _ = s_out, s_err
+                return False
+            return out_path.exists() and out_path.read_bytes() == b"AB"
         finally:
-            stop_server(server)
+            sock.close()
+            if server.poll() is None:
+                server.terminate()
+                try:
+                    server.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    server.kill()
 
-        # text file
-        print("Test: Text file with known content")
-        server = start_server(verbose)
+
+def malformed_bad_meta_session_times_out():
+    port = free_port(socket.AF_INET)
+    server = subprocess.Popen(
+        [str(BINARY), "-s", "-a", "127.0.0.1", "-p", str(port), "-o", "-", "-w", "1"],
+        cwd=str(PROJECT_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(1.0)
+    conn_id = random.randint(1, 0xFFFFFFFE)
+    target = ("127.0.0.1", port)
+    try:
+        time.sleep(0.1)
+        sock.sendto(build_rdt_packet(conn_id, 0, 0, FLAG_SYN), target)
+        synack = None
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            try:
+                hdr, _ = recv_packet(sock, timeout=0.4)
+            except socket.timeout:
+                continue
+            if hdr and hdr["conn_id"] == conn_id and (hdr["flags"] & (FLAG_SYN | FLAG_ACK)) == (FLAG_SYN | FLAG_ACK):
+                synack = hdr
+                break
+        if synack is None:
+            return False
+
+        sock.sendto(build_rdt_packet(conn_id, 1, synack["seq"] + 1, FLAG_ACK), target)
+
+        # only malformed META + out-of-order DATA; no valid progress
+        for _ in range(5):
+            bad_meta = struct.pack("!QI", 123, 2)
+            sock.sendto(build_rdt_packet(conn_id, 1, 1, FLAG_META, bad_meta, len_override=len(bad_meta) + 8), target)
+            sock.sendto(build_rdt_packet(conn_id, 99, 0, FLAG_DATA, b"X"), target)
+            time.sleep(0.05)
+
         try:
-            src = Path(tmpdir) / "text.txt"
-            content = "Hello, this is a test!\n" * 10
-            src.write_text(content)
-            h_src = md5sum(src)
-            rc, out, err = run_cmd(["-r", str(src), "-s", "127.0.0.1"]) 
-            dst = PROJECT_ROOT / "text.txt"
-            if dst.exists() and md5sum(dst) == h_src and dst.read_text() == content:
-                print(f"  {GREEN}✓{RESET} Text file transferred correctly\n")
-                dst.unlink()
-                passed += 1
-            else:
-                print(f"  {RED}✗ FAILED{RESET}: Text file transfer failed\n")
-                failed += 1
-        finally:
-            stop_server(server)
+            server.communicate(timeout=4)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.communicate()
+            return False
 
-        # empty file
-        print("Test: Empty file (0 bytes)")
-        server = start_server(verbose)
-        try:
-            src = Path(tmpdir) / "empty.txt"
-            src.write_bytes(b"")
-            rc, out, err = run_cmd(["-r", str(src), "-s", "127.0.0.1"]) 
-            dst = PROJECT_ROOT / "empty.txt"
-            if dst.exists() and dst.stat().st_size == 0:
-                print(f"  {GREEN}✓{RESET} Empty file handled correctly\n")
-                dst.unlink()
-                passed += 1
-            else:
-                print(f"  {YELLOW}⚠{RESET} Empty file not created (acceptable)\n")
-                passed += 1
-        finally:
-            stop_server(server)
+        return server.returncode != 0
+    finally:
+        sock.close()
+        if server.poll() is None:
+            server.terminate()
+            try:
+                server.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                server.kill()
 
-        # IPv6 localhost
-        print("Test: IPv6 localhost (::1)")
-        server = start_server(verbose)
-        try:
-            src = Path(tmpdir) / "ipv6.txt"
-            create_file(src, 500)
-            h_src = md5sum(src)
-            rc, out, err = run_cmd(["-r", str(src), "-s", "::1"]) 
-            dst = PROJECT_ROOT / "ipv6.txt"
-            if dst.exists() and md5sum(dst) == h_src:
-                print(f"  {GREEN}✓{RESET} IPv6 transfer successful\n")
-                dst.unlink()
-                passed += 1
-            else:
-                print(f"  {RED}✗ FAILED{RESET}: IPv6 transfer failed\n")
-                failed += 1
-        finally:
-            stop_server(server)
 
-        # hostname (localhost) transfer
-        print("Test: Hostname transfer (localhost)")
-        server = start_server(verbose)
-        try:
-            src = Path(tmpdir) / "host.txt"
-            create_file(src, 200)
-            h_src = md5sum(src)
-            rc, out, err = run_cmd(["-r", str(src), "-s", "localhost"]) 
-            dst = PROJECT_ROOT / "host.txt"
-            if dst.exists() and md5sum(dst) == h_src:
-                print(f"  {GREEN}✓{RESET} Hostname transfer successful\n")
-                dst.unlink()
-                passed += 1
-            else:
-                print(f"  {RED}✗ FAILED{RESET}: Hostname transfer failed\n")
-                failed += 1
-        finally:
-            stop_server(server)
+def malformed_suite():
+    print_header("Malformed / duplicate / out-of-order traffic")
+    p = f = 0
 
-    print("=" * 70)
-    print(f"Results: {GREEN}{passed} passed{RESET}, {RED}{failed} failed{RESET}, {YELLOW}{skipped} skipped{RESET}")
-    print("=" * 70)
-    print()
-    return passed, failed, skipped
+    try:
+        if malformed_noise_during_valid_transfer():
+            ok("ignores malformed random UDP datagrams")
+            p += 1
+        else:
+            fail("random malformed datagrams test failed")
+            f += 1
+    except Exception as e:
+        fail(f"random malformed datagrams: {e}")
+        f += 1
 
-# ------------------------- Main -------------------------
+    try:
+        if malformed_duplicate_out_of_order_bad_meta():
+            ok("handles bad META + duplicate + out-of-order packets")
+            p += 1
+        else:
+            fail("bad META / duplicate / out-of-order scenario failed")
+            f += 1
+    except Exception as e:
+        fail(f"bad META / duplicate / out-of-order: {e}")
+        f += 1
+
+    try:
+        if malformed_bad_meta_session_times_out():
+            ok("terminates malformed session with non-zero exit")
+            p += 1
+        else:
+            fail("malformed session timeout behavior failed")
+            f += 1
+    except Exception as e:
+        fail(f"malformed session timeout: {e}")
+        f += 1
+
+    return p, f, 0
+
 
 def main():
-    print("=" * 70)
-    print(" ICMP Covert Channel - Unified Test Suite")
-    print("=" * 70)
+    print_header("IPK-RDT Automated Test Suite")
     ensure_binary()
 
-    verbose = ("-v" in sys.argv) or ("--verbose" in sys.argv)
-
     total_p = total_f = total_s = 0
+    suites = [cli_suite, protocol_limits_suite, transfer_suite, malformed_suite]
 
-    # 1) Arguments
-    ap, af, as_ = arguments_suite(verbose)
-    total_p += ap; total_f += af; total_s += as_
+    for suite in suites:
+        p, f, s = suite()
+        total_p += p
+        total_f += f
+        total_s += s
+        print()
 
-    # 2) Protocol
-    pp, pf, ps = protocol_suite(verbose)
-    total_p += pp; total_f += pf; total_s += ps
-
-    # 3) Integration
-    ip, iff, is_ = integration_suite(verbose)
-    total_p += ip; total_f += iff; total_s += is_
-
-    print("\n" + "=" * 70)
-    print(" SUMMARY")
-    print("=" * 70)
-    print(f" TOTAL: {GREEN}{total_p} passed{RESET}, {RED}{total_f} failed{RESET}, {YELLOW}{total_s} skipped{RESET}")
-    print("=" * 70)
+    print("=" * 72)
+    print("SUMMARY")
+    print("=" * 72)
+    print(f"TOTAL: {GREEN}{total_p} passed{RESET}, {RED}{total_f} failed{RESET}, {YELLOW}{total_s} skipped{RESET}")
+    print("=" * 72)
 
     return 0 if total_f == 0 else 1
+
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        print("\n\nTests interrupted by user")
+        print("\nInterrupted by user.")
         sys.exit(1)

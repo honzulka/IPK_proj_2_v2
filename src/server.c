@@ -76,8 +76,7 @@ static int create_socket(const char *address, int port) {
 
 /* ================= SEND HELPER ================= */
 
-static void send_pkt(int sock, const rdt_header_t *hdr,
-                     struct sockaddr *addr, socklen_t addrlen) {
+static void send_pkt(int sock, const rdt_header_t *hdr, struct sockaddr *addr, socklen_t addrlen) {
   pkt_t pkt = build_packet(hdr, NULL);
   if (pkt.data) {
     sendto(sock, pkt.data, pkt.len, 0, addr, addrlen);
@@ -87,7 +86,7 @@ static void send_pkt(int sock, const rdt_header_t *hdr,
 
 /* ================= SERVER ================= */
 
-void start_server(int port, const char *address, FILE *output, int timeout) {
+void start_server(int port, const char *address, FILE *output, int timeout, int verbose) {
 
   int sock = create_socket(address, port);
   if (sock < 0) {
@@ -136,8 +135,7 @@ void start_server(int port, const char *address, FILE *output, int timeout) {
       exit(EXIT_FAILURE);
     }
 
-    ssize_t n = recvfrom(sock, buffer, sizeof(buffer), 0,
-                         (struct sockaddr *)&client_addr, &client_len);
+    ssize_t n = recvfrom(sock, buffer, sizeof(buffer), 0, (struct sockaddr *)&client_addr, &client_len);
 
     if (n < (ssize_t)RDT_HEADER_SIZE)
       continue;
@@ -224,8 +222,9 @@ void start_server(int port, const char *address, FILE *output, int timeout) {
         uint64_t file_size    = be64toh(meta.file_size);
         total_segments        = ntohl(meta.total_segments);
 
-        fprintf(stderr, "META received: file_size=%llu, segments=%u\n",
-                (unsigned long long)file_size, total_segments);
+        if (verbose) {
+          fprintf(stderr, "META received: file_size=%llu, segments=%u\n", (unsigned long long)file_size, total_segments);
+        }
 
         /* Allocate duplicate detection bitmap */
         free(received);
@@ -341,8 +340,7 @@ void start_server(int port, const char *address, FILE *output, int timeout) {
         if (select(sock + 1, &fds2, NULL, NULL, &tv2) <= 0)
           break; /* timeout: assume client received our ACK+FIN */
 
-        ssize_t n2 = recvfrom(sock, buf2, sizeof(buf2), 0,
-                              (struct sockaddr *)&from2, &from2_len);
+        ssize_t n2 = recvfrom(sock, buf2, sizeof(buf2), 0, (struct sockaddr *)&from2, &from2_len);
         if (n2 < (ssize_t)RDT_HEADER_SIZE)
           continue;
 
