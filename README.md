@@ -249,6 +249,12 @@ Pakety 40 a 42 (`ICMPv6 Destination Unreachable – Port unreachable`) vznikají
 
 ---
 
+## Poznámka k využití AI
+
+Při tvorbě části testů a dokumentace byly pro pomocné účely využity nástroje založené na AI (návrhy textů a struktury dokumentace, doporučení pro testovací scénáře). Konkrétně byl použit model GPT-5.2 od Github Copilota. Finální obsah byl zkontrolován a upraven autorem projektu.
+
+---
+
 ## Zdroje
 
 - https://www.geeksforgeeks.org/computer-networks/udp-client-server-using-connect-c-implementation/
