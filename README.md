@@ -120,11 +120,12 @@ Client po handshake odešle `META` se strukturou:
 
 Server potvrdí `ACK` s `ack=2`.
 
-### 3) DATA (Go-Back-N)
+### 3) DATA (windowed transfer + cumulative ACK)
 
 - DATA segmenty běží od `seq=2`
-- client posílá oknem (`WINDOW_SIZE=16`)
+- client posílá oknem (`WINDOW_SIZE=32`)
 - server udržuje `expected_seq` a posílá kumulativní ACK
+- server bufferuje out-of-order segmenty a flushuje je do výstupu, jakmile vznikne souvislá řada od `expected_seq`
 
 ### 4) Ukončení
 
@@ -146,17 +147,21 @@ Server potvrdí `ACK` s `ack=2`.
 ### ACK strategie
 
 - kumulativní ACK: `ack` = nejbližší očekávané `seq`
-- out-of-order/duplicate DATA server nezapisuje a vrací aktuální kumulativní ACK
+- duplicate DATA jsou ignorovány
+- out-of-order DATA se na serveru dočasně bufferují, ale ACK zůstává kumulativní
 
 ### Retransmise a timeouty
 
-Client čeká na příchozí paket přes `select()` s timeoutem `-w`.  
+Client používá dva časové režimy:
+
+- **interní retransmit timer** (sub-sekundový, typicky desítky až stovky ms) pro rychlé opakované odesílání při ztrátách,
+- **externí no-progress timeout `-w`** jako maximální interval bez skutečného protokolového posunu.
+
 Pokud timeout vyprší:
 
 - během DATA fáze nastaví `next = base` (Go-Back-N retransmit)
-- při dlouhodobém nulovém progressu ukončí přenos chybou
-
-V aktuální jednoduché variantě je ukončení při **3 po sobě jdoucích timeout intervalech bez progressu** (`MAX_TIMEOUTS_WITHOUT_PROGRESS = 3`).
+- při vyčerpání `-w` bez progressu se relace ukončí chybou (non-zero exit code)
+- fast retransmit je aktivní při opakovaných duplicitních ACK
 
 ---
 
@@ -218,12 +223,16 @@ Automatické testy (`tests/test_all.py`) pokrývají:
 - CLI validace
 - kontrolu protokolových limitů (1200 B constraint)
 - přenosové scénáře (IPv4/IPv6, file/stdin/stdout, empty input)
+- přenos přes non-loopback IPv4 rozhraní
 - robustnost na malformed traffic:
   - náhodné nevalidní UDP datagramy
   - chybný META
   - duplicitní a out-of-order DATA
   - checksum corruption
   - ukončení malformed session s non-zero návratovým kódem
+- samostatná kapitola „Two-device namespace tests“:
+  - dvě oddělená zařízení simulovaná přes Linux network namespaces + veth
+  - scénáře clean/duplicate/reorder/corrupt/mixed/malformed-noise (mixed je záměrně mírně kalibrovaný kvůli reprodukovatelnosti)
 
 ---
 
