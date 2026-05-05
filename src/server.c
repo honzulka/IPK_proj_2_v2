@@ -84,6 +84,14 @@ static void send_pkt(int sock, const rdt_header_t *hdr, struct sockaddr *addr, s
   }
 }
 
+static void free_segment_store(uint8_t **segments, uint32_t total_segments) {
+  if (!segments)
+    return;
+  for (uint32_t i = 0; i < total_segments; i++) {
+    free(segments[i]);
+  }
+}
+
 /* ================= SERVER ================= */
 
 void start_server(int port, const char *address, FILE *output, int timeout, int verbose) {
@@ -114,6 +122,8 @@ void start_server(int port, const char *address, FILE *output, int timeout, int 
 
   /* Duplicate detection bitmap (one byte per segment, indexed by seq-2) */
   uint8_t *received = NULL;
+  uint8_t **segment_data = NULL;
+  uint16_t *segment_len = NULL;
 
   fd_set readfds;
 
@@ -130,6 +140,9 @@ void start_server(int port, const char *address, FILE *output, int timeout, int 
     int rv = select(sock + 1, &readfds, NULL, NULL, &tv);
     if (rv <= 0) {
       fprintf(stderr, "ERROR: Timeout (state=%d)\n", state);
+      free_segment_store(segment_data, total_segments);
+      free(segment_data);
+      free(segment_len);
       free(received);
       close(sock);
       exit(EXIT_FAILURE);
@@ -227,16 +240,27 @@ void start_server(int port, const char *address, FILE *output, int timeout, int 
         }
 
         /* Allocate duplicate detection bitmap */
+        free_segment_store(segment_data, total_segments);
+        free(segment_data);
+        free(segment_len);
         free(received);
         if (total_segments > 0) {
           received = calloc(total_segments, sizeof(uint8_t));
-          if (!received) {
+          segment_data = calloc(total_segments, sizeof(uint8_t *));
+          segment_len = calloc(total_segments, sizeof(uint16_t));
+          if (!received || !segment_data || !segment_len) {
             fprintf(stderr, "ERROR: calloc failed\n");
+            free_segment_store(segment_data, total_segments);
+            free(segment_data);
+            free(segment_len);
+            free(received);
             close(sock);
             exit(EXIT_FAILURE);
           }
         } else {
           received = NULL;
+          segment_data = NULL;
+          segment_len = NULL;
         }
 
         meta_received = 1;
@@ -279,16 +303,37 @@ void start_server(int port, const char *address, FILE *output, int timeout, int 
 
       uint32_t idx = hdr.seq - 2; /* map seq → 0-based index */
 
-      if (hdr.seq == expected_seq) {
-        /* In-order packet: write and advance */
-        if (!received[idx]) {
-          fwrite(payload, 1, hdr.len, output);
-          received[idx] = 1;
+      if (!received[idx]) {
+        if (hdr.len > 0) {
+          segment_data[idx] = malloc(hdr.len);
+          if (!segment_data[idx]) {
+            fprintf(stderr, "ERROR: malloc failed\n");
+            free_segment_store(segment_data, total_segments);
+            free(segment_data);
+            free(segment_len);
+            free(received);
+            close(sock);
+            exit(EXIT_FAILURE);
+          }
+          memcpy(segment_data[idx], payload, hdr.len);
+        }
+        segment_len[idx] = hdr.len;
+        received[idx] = 1;
+      }
+
+      /* Flush all contiguous received segments starting from expected_seq. */
+      while (expected_seq < total_segments + 2) {
+        uint32_t widx = expected_seq - 2;
+        if (!received[widx])
+          break;
+        if (segment_len[widx] > 0 && segment_data[widx]) {
+          fwrite(segment_data[widx], 1, segment_len[widx], output);
+          free(segment_data[widx]);
+          segment_data[widx] = NULL;
+          segment_len[widx] = 0;
         }
         expected_seq++;
       }
-      /* Out-of-order or duplicate (hdr.seq != expected_seq):
-       * discard silently – Go-Back-N will cause retransmission. */
 
       /* Send cumulative ACK */
       rdt_header_t ack = {
@@ -305,6 +350,18 @@ void start_server(int port, const char *address, FILE *output, int timeout, int 
     /* ================= FIN ================= */
 
     if (hdr.flags & FLAG_FIN) {
+      /* Ignore FIN until all announced data segments are assembled. */
+      if (expected_seq < total_segments + 2) {
+        rdt_header_t ack_incomplete = {
+          .conn_id = conn_id,
+          .seq     = 0,
+          .ack     = expected_seq,
+          .len     = 0,
+          .flags   = FLAG_ACK
+        };
+        send_pkt(sock, &ack_incomplete, (struct sockaddr *)&client_addr, client_len);
+        continue;
+      }
 
       /* Send ACK for client's FIN */
       rdt_header_t ack = {
@@ -365,6 +422,9 @@ void start_server(int port, const char *address, FILE *output, int timeout, int 
       if (output != stdout)
         fclose(output);
 
+      free_segment_store(segment_data, total_segments);
+      free(segment_data);
+      free(segment_len);
       free(received);
       close(sock);
       return;
